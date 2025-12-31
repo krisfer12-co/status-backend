@@ -1,6 +1,6 @@
-fastapi==0.110.1
-uvicorn==0.25.0
-motor==3.3.1
-pydantic==2.6.4
-email-validator==2.2.0
-requests==2.31.0
+fastapi
+uvicorn
+motor
+pydantic
+email-validator
+requests
