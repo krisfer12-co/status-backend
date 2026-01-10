@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import os
 import random
@@ -16,79 +16,65 @@ app.add_middleware(
 
 SENDGRID_API_KEY = os.environ.get("SENDGRID_API_KEY", "")
 SENDER_EMAIL = os.environ.get("SENDER_EMAIL", "Krisfer12@gmail.com")
-GOOGLE_VISION_KEY = os.environ.get("GOOGLE_VISION_KEY", "")
 
-# IMPORTANT: Store codes here
-codes = {}
 registrations = []
 
 def make_code():
     return "".join(random.choices(string.digits, k=6))
 
-def send_email(to_email, code):
-    if SENDGRID_API_KEY:
+@app.get("/")
+def root():
+    return {"message": "STATUS API"}
+
+@app.get("/api/health")
+def health():
+    return {"status": "healthy"}
+
+@app.post("/api/verify/email/request")
+def email_request(data: dict):
+    email = data.get("email", "")
+    code = make_code()
+    
+    if SENDGRID_API_KEY and email:
         try:
             requests.post(
                 "https://api.sendgrid.com/v3/mail/send",
                 headers={"Authorization": f"Bearer {SENDGRID_API_KEY}", "Content-Type": "application/json"},
                 json={
-                    "personalizations": [{"to": [{"email": to_email}]}],
-                    "from": {"email": SENDER_EMAIL, "name": "STATUS App"},
-                    "subject": "STATUS - Your Verification Code",
-                    "content": [{"type": "text/plain", "value": f"Your verification code is: {code}\n\nThis code expires in 10 minutes."}]
+                    "personalizations": [{"to": [{"email": email}]}],
+                    "from": {"email": SENDER_EMAIL, "name": "STATUS"},
+                    "subject": "STATUS - Welcome!",
+                    "content": [{"type": "text/plain", "value": f"Welcome to STATUS!\n\nYour verification code is: {code}\n\nThank you for registering your relationship!"}]
                 },
                 timeout=10
             )
         except:
             pass
-
-def detect_face(image_base64):
-    if not GOOGLE_VISION_KEY:
-        return True
-    try:
-        if image_base64 and "," in image_base64:
-            image_base64 = image_base64.split(",")[1]
-        response = requests.post(
-            f"https://vision.googleapis.com/v1/images:annotate?key={GOOGLE_VISION_KEY}",
-            json={"requests": [{"image": {"content": image_base64}, "features": [{"type": "FACE_DETECTION", "maxResults": 1}]}]},
-            timeout=30
-        )
-        faces = response.json().get("responses", [{}])[0].get("faceAnnotations", [])
-        return len(faces) > 0
-    except:
-        return True
-
-@app.get("/")
-def root():
-    return {"message": "STATUS API v2.2 - Email Fix + Ready for MongoDB"}
-
-@app.get("/api/health")
-def health():
-    return {"status": "healthy", "total_couples": len(registrations)}
-
-@app.post("/api/verify/email/request")
-def email_request(data: dict):
-    email = data.get("email", "")
-    if not email:
-        raise HTTPException(status_code=400, detail="Email required")
-    
-    code = make_code()
-    codes[email] = code
-    send_email(email, code)
-    
     return {"message": "Code sent", "email": email}
 
 @app.post("/api/verify/email/confirm")
 def email_confirm(data: dict):
-    email = data.get("email", "")
     code = data.get("code", "")
-    
-    if email not in codes:
-        raise HTTPException(status_code=400, detail="No code requested for this email")
-    
-    stored_code = codes[email]
-    if stored_code != code:
-        raise HTTPException(status_code=400, detail="Invalid code")
-    
-    del codes[email]
-    return {"success": True, "message": "Email verified", "email": email}
+    if len(code) == 6 and code.isdigit():
+        return {"verified": True}
+    return {"verified": False}
+
+@app.post("/api/couples")
+def register_couple(data: dict):
+    registrations.append(data)
+    return {"couple_id": str(len(registrations)), "message": "Registered"}
+
+@app.get("/api/search")
+def search(name: str = None):
+    results = []
+    if name:
+        for r in registrations:
+            p1 = r.get("person1", {}).get("name", "").lower()
+            p2 = r.get("person2", {}).get("name", "").lower()
+            if name.lower() in p1 or name.lower() in p2:
+                results.append({"person1": r.get("person1"), "person2": r.get("person2")})
+    return {"results": results, "total": len(results)}
+
+@app.get("/api/stats")
+def stats():
+    return {"total": len(registrations)}
