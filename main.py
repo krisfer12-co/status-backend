@@ -4,6 +4,7 @@ import os
 import random
 import string
 import requests
+import stripe
 
 app = FastAPI()
 
@@ -16,6 +17,8 @@ app.add_middleware(
 
 SENDGRID_API_KEY = os.environ.get("SENDGRID_API_KEY", "")
 SENDER_EMAIL = os.environ.get("SENDER_EMAIL", "Krisfer12@gmail.com")
+STRIPE_SECRET_KEY = os.environ.get("STRIPE_SECRET_KEY", "")
+stripe.api_key = STRIPE_SECRET_KEY
 
 registrations = []
 
@@ -58,6 +61,30 @@ def email_confirm(data: dict):
     if len(code) == 6 and code.isdigit():
         return {"verified": True}
     return {"verified": False}
+
+@app.post("/api/payment/create")
+def create_payment(data: dict):
+    if not STRIPE_SECRET_KEY:
+        return {"error": "Payments not configured"}
+    
+    try:
+        session = stripe.checkout.Session.create(
+            payment_method_types=["card"],
+            line_items=[{
+                "price_data": {
+                    "currency": "usd",
+                    "product_data": {"name": "STATUS - Couple Registration"},
+                    "unit_amount": 99,
+                },
+                "quantity": 1,
+            }],
+            mode="payment",
+            success_url="https://vite-react-rouge-omega-62.vercel.app/?paid=true",
+            cancel_url="https://vite-react-rouge-omega-62.vercel.app/?paid=false",
+        )
+        return {"url": session.url, "session_id": session.id}
+    except Exception as e:
+        return {"error": str(e)}
 
 @app.post("/api/couples")
 def register_couple(data: dict):
