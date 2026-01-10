@@ -92,4 +92,3 @@ def email_confirm(data: dict):
     if stored_code != code:
         raise HTTPException(status_code=400, detail="Invalid code")
     
-    # Code is correct - delete it
