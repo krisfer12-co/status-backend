@@ -16,7 +16,6 @@ app.add_middleware(
 
 SENDGRID_API_KEY = os.environ.get("SENDGRID_API_KEY", "")
 SENDER_EMAIL = os.environ.get("SENDER_EMAIL", "Krisfer12@gmail.com")
-GOOGLE_VISION_KEY = os.environ.get("GOOGLE_VISION_KEY", "")
 
 codes = {}
 registrations = []
@@ -24,42 +23,9 @@ registrations = []
 def make_code():
     return "".join(random.choices(string.digits, k=6))
 
-def send_email(to_email, code):
-    if SENDGRID_API_KEY:
-        try:
-            requests.post(
-                "https://api.sendgrid.com/v3/mail/send",
-                headers={"Authorization": f"Bearer {SENDGRID_API_KEY}", "Content-Type": "application/json"},
-                json={
-                    "personalizations": [{"to": [{"email": to_email}]}],
-                    "from": {"email": SENDER_EMAIL, "name": "STATUS App"},
-                    "subject": "STATUS - Your Verification Code",
-                    "content": [{"type": "text/plain", "value": f"Your verification code is: {code}\n\nThis code expires in 10 minutes."}]
-                },
-                timeout=10
-            )
-        except:
-            pass
-
-def detect_face(image_base64):
-    if not GOOGLE_VISION_KEY:
-        return True
-    try:
-        if image_base64 and "," in image_base64:
-            image_base64 = image_base64.split(",")[1]
-        response = requests.post(
-            f"https://vision.googleapis.com/v1/images:annotate?key={GOOGLE_VISION_KEY}",
-            json={"requests": [{"image": {"content": image_base64}, "features": [{"type": "FACE_DETECTION", "maxResults": 1}]}]},
-            timeout=30
-        )
-        faces = response.json().get("responses", [{}])[0].get("faceAnnotations", [])
-        return len(faces) > 0
-    except:
-        return True
-
 @app.get("/")
 def root():
-    return {"message": "STATUS API v2.1"}
+    return {"message": "STATUS API"}
 
 @app.get("/api/health")
 def health():
@@ -68,11 +34,24 @@ def health():
 @app.post("/api/verify/email/request")
 def email_request(data: dict):
     email = data.get("email", "")
-    if not email:
-        raise HTTPException(status_code=400, detail="Email required")
     code = make_code()
     codes[email] = code
-    send_email(email, code)
+    
+    if SENDGRID_API_KEY and email:
+        try:
+            requests.post(
+                "https://api.sendgrid.com/v3/mail/send",
+                headers={"Authorization": f"Bearer {SENDGRID_API_KEY}", "Content-Type": "application/json"},
+                json={
+                    "personalizations": [{"to": [{"email": email}]}],
+                    "from": {"email": SENDER_EMAIL, "name": "STATUS"},
+                    "subject": "STATUS - Your Verification Code",
+                    "content": [{"type": "text/plain", "value": f"Your verification code is: {code}"}]
+                },
+                timeout=10
+            )
+        except:
+            pass
     return {"message": "Code sent", "email": email}
 
 @app.post("/api/verify/email/confirm")
@@ -80,31 +59,14 @@ def email_confirm(data: dict):
     email = data.get("email", "")
     code = data.get("code", "")
     stored = codes.get(email)
+    
     if not stored:
-        raise HTTPException(status_code=400, detail="No code requested for this email")
+        raise HTTPException(status_code=400, detail="No code sent to this email")
     if stored != code:
-        raise HTTPException(status_code=400, detail="Invalid code")
+        raise HTTPException(status_code=400, detail="Wrong code")
+    
     del codes[email]
     return {"verified": True}
-
-@app.post("/api/verify/id/upload")
-def id_upload(data: dict):
-    return {"success": True}
-
-@app.post("/api/verify/face")
-def face_verify(data: dict):
-    id_image = data.get("id_image", "")
-    selfie = data.get("selfie", "")
-    
-    id_has_face = detect_face(id_image)
-    selfie_has_face = detect_face(selfie)
-    
-    if not id_has_face:
-        return {"match": False, "confidence": 0, "message": "No face detected in ID photo"}
-    if not selfie_has_face:
-        return {"match": False, "confidence": 0, "message": "No face detected in selfie"}
-    
-    return {"match": True, "confidence": 0.92, "message": "Face verified"}
 
 @app.post("/api/couples")
 def register_couple(data: dict):
