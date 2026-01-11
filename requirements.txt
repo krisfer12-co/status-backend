@@ -2,3 +2,5 @@ fastapi
 uvicorn
 requests
 stripe
+pymongo
+dnspython
