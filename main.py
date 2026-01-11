@@ -27,16 +27,16 @@ stripe.api_key = STRIPE_SECRET_KEY
 
 db = None
 couples_collection = None
-verification_codes = None
+verification_codes_collection = None
 
 def get_db():
-    global db, couples_collection, verification_codes
+    global db, couples_collection, verification_codes_collection
     if db is None and MONGODB_URI:
         try:
             client = MongoClient(MONGODB_URI)
             db = client.statusapp
             couples_collection = db.couples
-            verification_codes = db.verification_codes
+            verification_codes_collection = db.verification_codes
             couples_collection.create_index([("person1.name", "text"), ("person2.name", "text")])
         except Exception as e:
             print(f"MongoDB connection error: {e}")
@@ -60,23 +60,27 @@ def health():
 
 @app.post("/api/verify/email/request")
 def email_request(data: dict):
-    email = data.get("email", "")
+    email = data.get("email", "").strip().lower()
     code = make_code()
     
+    # Always store in memory as backup
+    memory_codes[email] = code
+    print(f"Storing code {code} for email {email}")
+    
+    # Also try to store in MongoDB
     db = get_db()
     if db is not None:
         try:
-            verification_codes.update_one(
+            verification_codes_collection.update_one(
                 {"email": email},
                 {"$set": {"code": code, "created_at": datetime.utcnow()}},
                 upsert=True
             )
+            print(f"Code stored in MongoDB for {email}")
         except Exception as e:
-            print(f"Error storing code: {e}")
-            memory_codes[email] = code
-    else:
-        memory_codes[email] = code
+            print(f"Error storing code in MongoDB: {e}")
     
+    # Send email
     if SENDGRID_API_KEY and email:
         try:
             html_content = f"""
@@ -109,6 +113,7 @@ def email_request(data: dict):
                 },
                 timeout=10
             )
+            print(f"Email sent to {email}")
         except Exception as e:
             print(f"Email error: {e}")
     
@@ -116,8 +121,10 @@ def email_request(data: dict):
 
 @app.post("/api/verify/email/confirm")
 def email_confirm(data: dict):
-    code = data.get("code", "")
-    email = data.get("email", "")
+    code = data.get("code", "").strip()
+    email = data.get("email", "").strip().lower()
+    
+    print(f"Verifying code {code} for email {email}")
     
     if not code or not email:
         return {"verified": False, "error": "Email and code required"}
@@ -125,34 +132,43 @@ def email_confirm(data: dict):
     if len(code) != 6 or not code.isdigit():
         return {"verified": False, "error": "Invalid code format"}
     
+    # First check memory (most reliable)
+    if email in memory_codes:
+        print(f"Found code in memory: {memory_codes[email]}")
+        if memory_codes[email] == code:
+            del memory_codes[email]
+            print("Code verified from memory!")
+            return {"verified": True}
+        else:
+            print(f"Code mismatch. Expected {memory_codes[email]}, got {code}")
+    
+    # Then check MongoDB
     db = get_db()
     if db is not None:
         try:
-            stored = verification_codes.find_one({"email": email})
-            if stored and stored.get("code") == code:
-                created_at = stored.get("created_at")
-                if created_at:
-                    age = (datetime.utcnow() - created_at).total_seconds()
-                    if age > 600:
-                        verification_codes.delete_one({"email": email})
-                        return {"verified": False, "error": "Code expired. Request a new one."}
-                
-                verification_codes.delete_one({"email": email})
-                return {"verified": True}
+            stored = verification_codes_collection.find_one({"email": email})
+            if stored:
+                print(f"Found code in MongoDB: {stored.get('code')}")
+                if stored.get("code") == code:
+                    # Check expiration (10 minutes)
+                    created_at = stored.get("created_at")
+                    if created_at:
+                        age = (datetime.utcnow() - created_at).total_seconds()
+                        if age > 600:
+                            verification_codes_collection.delete_one({"email": email})
+                            return {"verified": False, "error": "Code expired. Request a new one."}
+                    
+                    verification_codes_collection.delete_one({"email": email})
+                    print("Code verified from MongoDB!")
+                    return {"verified": True}
+                else:
+                    print(f"Code mismatch in MongoDB. Expected {stored.get('code')}, got {code}")
             else:
-                return {"verified": False, "error": "Invalid code"}
+                print(f"No code found in MongoDB for {email}")
         except Exception as e:
-            print(f"Verification error: {e}")
-            return {"verified": False, "error": "Verification failed"}
+            print(f"MongoDB verification error: {e}")
     
-    if email in memory_codes:
-        if memory_codes[email] == code:
-            del memory_codes[email]
-            return {"verified": True}
-        else:
-            return {"verified": False, "error": "Invalid code"}
-    
-    return {"verified": False, "error": "No code found. Request a new one."}
+    return {"verified": False, "error": "Invalid code. Please request a new one."}
 
 @app.post("/api/payment/create")
 def create_payment(data: dict):
@@ -353,5 +369,7 @@ def admin_all(limit: int = 100):
             "person2": r.get("person2", {}).get("name", ""),
             "registered_at": r.get("registered_at", "").isoformat() if r.get("registered_at") else None
         })
-    
-    return {"registrations": results, "count": len(results)}
+        
+        return {"registrations": results, "count": len(results)}
+
+
