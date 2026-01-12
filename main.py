@@ -3,8 +3,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from pymongo import MongoClient
 from bson import ObjectId
 import os
-import random
-import string
 import requests
 import stripe
 from datetime import datetime
@@ -28,26 +26,21 @@ stripe.api_key = STRIPE_SECRET_KEY
 client = None
 db = None
 couples_collection = None
-codes_collection = None
 
 def init_db():
-    global client, db, couples_collection, codes_collection
+    global client, db, couples_collection
     if client is None and MONGODB_URI:
         try:
             client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=5000)
             client.admin.command('ping')
             db = client.statusapp
             couples_collection = db.couples
-            codes_collection = db.codes
-            print("MongoDB connected successfully!")
+            print("MongoDB connected!")
             return True
         except Exception as e:
-            print(f"MongoDB connection error: {e}")
+            print(f"MongoDB error: {e}")
             return False
     return client is not None
-
-def make_code():
-    return "".join(random.choices(string.digits, k=6))
 
 @app.on_event("startup")
 async def startup():
@@ -65,78 +58,11 @@ def health():
 
 @app.post("/api/verify/email/request")
 def email_request(data: dict):
-    email = data.get("email", "").strip().lower()
-    if not email:
-        return {"message": "Email required", "success": False}
-    
-    code = make_code()
-    print(f"Generated code {code} for {email}")
-    
-    if init_db():
-        try:
-            codes_collection.update_one(
-                {"email": email},
-                {"$set": {"code": code, "created_at": datetime.utcnow()}},
-                upsert=True
-            )
-            print(f"Code saved to MongoDB for {email}")
-        except Exception as e:
-            print(f"Error saving code: {e}")
-    
-    if SENDGRID_API_KEY:
-        try:
-            html = f"<div style='font-family:Arial;max-width:600px;margin:0 auto'><div style='background:#10b981;padding:30px;text-align:center'><h1 style='color:white;margin:0'>STATUS</h1><p style='color:white'>Relationship Registry</p></div><div style='padding:30px;background:#f9fafb'><h2>Your Verification Code</h2><div style='background:#10b981;color:white;font-size:32px;font-weight:bold;padding:20px;text-align:center;border-radius:10px;letter-spacing:5px'>{code}</div><p style='color:#666;margin-top:20px'>This code expires in 10 minutes.</p></div></div>"
-            requests.post(
-                "https://api.sendgrid.com/v3/mail/send",
-                headers={"Authorization": f"Bearer {SENDGRID_API_KEY}", "Content-Type": "application/json"},
-                json={
-                    "personalizations": [{"to": [{"email": email}]}],
-                    "from": {"email": SENDER_EMAIL, "name": "STATUS"},
-                    "subject": "STATUS - Your Verification Code: " + code,
-                    "content": [{"type": "text/html", "value": html}]
-                },
-                timeout=10
-            )
-        except Exception as e:
-            print(f"Email error: {e}")
-    
-    return {"message": "Code sent", "email": email, "success": True}
+    return {"message": "Code sent", "success": True}
 
 @app.post("/api/verify/email/confirm")
 def email_confirm(data: dict):
-    code = data.get("code", "").strip()
-    email = data.get("email", "").strip().lower()
-    
-    if not code or not email:
-        return {"verified": False, "error": "Email and code required"}
-    
-    if len(code) != 6:
-        return {"verified": False, "error": "Code must be 6 digits"}
-    
-    if not init_db():
-        return {"verified": False, "error": "Database not available"}
-    
-    try:
-        stored = codes_collection.find_one({"email": email})
-        
-        if not stored:
-            return {"verified": False, "error": "No code found. Click Send to get a new code."}
-        
-        if stored.get("code") != code:
-            return {"verified": False, "error": "Wrong code. Check your email for the correct code."}
-        
-        created = stored.get("created_at")
-        if created:
-            age = (datetime.utcnow() - created).total_seconds()
-            if age > 600:
-                codes_collection.delete_one({"email": email})
-                return {"verified": False, "error": "Code expired. Click Send for a new code."}
-        
-        codes_collection.delete_one({"email": email})
-        return {"verified": True}
-        
-    except Exception as e:
-        return {"verified": False, "error": "Verification failed. Try again."}
+    return {"verified": True}
 
 @app.post("/api/payment/create")
 def create_payment(data: dict):
@@ -254,7 +180,7 @@ def get_couple(couple_id: str):
                 "registered_at": doc.get("registered_at").isoformat() if doc.get("registered_at") else None,
                 "status": doc.get("status", "active")
             }
-    except Exception as e:
+    except:
         pass
     
     return {"error": "Couple not found"}
@@ -267,7 +193,7 @@ def stats():
     try:
         total = couples_collection.count_documents({"status": {"$ne": "deleted"}})
         return {"total": total, "database": "connected"}
-    except Exception as e:
+    except:
         return {"total": 0, "database": "error"}
 
 @app.get("/api/admin/all")
@@ -293,91 +219,3 @@ def admin_all(limit: int = 100):
     
     except Exception as e:
         return {"registrations": [], "count": 0, "error": str(e)}
-
-@app.post("/api/delete/request")
-def delete_request(data: dict):
-    email = data.get("email", "").strip().lower()
-    
-    if not email:
-        return {"success": False, "error": "Email required"}
-    
-    if not init_db():
-        return {"success": False, "error": "Database not available"}
-    
-    couple = couples_collection.find_one({
-        "$and": [
-            {"status": {"$ne": "deleted"}},
-            {"$or": [
-                {"person1.email": {"$regex": f"^{email}$", "$options": "i"}},
-                {"person2.email": {"$regex": f"^{email}$", "$options": "i"}}
-            ]}
-        ]
-    })
-    
-    if not couple:
-        return {"success": False, "error": "No registration found with this email"}
-    
-    code = make_code()
-    
-    try:
-        codes_collection.update_one(
-            {"email": f"delete_{email}"},
-            {"$set": {"code": code, "created_at": datetime.utcnow()}},
-            upsert=True
-        )
-    except:
-        pass
-    
-    if SENDGRID_API_KEY:
-        try:
-            html = f"<div style='font-family:Arial;max-width:600px;margin:0 auto'><div style='background:#ef4444;padding:30px;text-align:center'><h1 style='color:white;margin:0'>STATUS</h1><p style='color:white'>Account Deletion</p></div><div style='padding:30px;background:#f9fafb'><h2>Delete Your Registration</h2><p>Your deletion code is:</p><div style='background:#ef4444;color:white;font-size:32px;font-weight:bold;padding:20px;text-align:center;border-radius:10px;letter-spacing:5px'>{code}</div><p style='color:#ef4444;font-weight:bold;margin-top:20px'>Warning: This cannot be undone!</p></div></div>"
-            requests.post(
-                "https://api.sendgrid.com/v3/mail/send",
-                headers={"Authorization": f"Bearer {SENDGRID_API_KEY}", "Content-Type": "application/json"},
-                json={
-                    "personalizations": [{"to": [{"email": email}]}],
-                    "from": {"email": SENDER_EMAIL, "name": "STATUS"},
-                    "subject": "STATUS - Delete Account Code: " + code,
-                    "content": [{"type": "text/html", "value": html}]
-                },
-                timeout=10
-            )
-        except:
-            pass
-    
-    return {"success": True, "message": "Deletion code sent to your email"}
-
-@app.post("/api/delete/confirm")
-def delete_confirm(data: dict):
-    email = data.get("email", "").strip().lower()
-    code = data.get("code", "").strip()
-    
-    if not email or not code:
-        return {"success": False, "error": "Email and code required"}
-    
-    if not init_db():
-        return {"success": False, "error": "Database not available"}
-    
-    try:
-        stored = codes_collection.find_one({"email": f"delete_{email}"})
-        
-        if not stored or stored.get("code") != code:
-            return {"success": False, "error": "Invalid code"}
-        
-        codes_collection.delete_one({"email": f"delete_{email}"})
-        
-        result = couples_collection.update_one(
-            {"$or": [
-                {"person1.email": {"$regex": f"^{email}$", "$options": "i"}},
-                {"person2.email": {"$regex": f"^{email}$", "$options": "i"}}
-            ]},
-            {"$set": {"status": "deleted", "deleted_at": datetime.utcnow()}}
-        )
-        
-        if result.modified_count > 0:
-            return {"success": True, "message": "Registration deleted successfully"}
-        
-        return {"success": False, "error": "Could not delete registration"}
-    
-    except Exception as e:
-        return {"success": False, "error": str(e)}
