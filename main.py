@@ -1,317 +1,211 @@
-from fastapi import FastAPI
+# Add these routes to your main.py backend file
+
+from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pymongo import MongoClient
-from bson import ObjectId
+from pydantic import BaseModel
+from typing import List, Optional
+import boto3
 import os
-import requests
-import stripe
 from datetime import datetime
+import uuid
 
 app = FastAPI()
 
+# Add CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-SENDGRID_API_KEY = os.environ.get("SENDGRID_API_KEY", "")
-SENDER_EMAIL = os.environ.get("SENDER_EMAIL", "Krisfer12@gmail.com")
-STRIPE_SECRET_KEY = os.environ.get("STRIPE_SECRET_KEY", "")
-MONGODB_URI = os.environ.get("MONGODB_URI", "")
-FRONTEND_URL = "https://vite-react-rouge-omega-62.vercel.app"
+# Models
+class CoupleCustomization(BaseModel):
+    customColor: Optional[str] = "#667eea"
+    loveStory: Optional[str] = ""
+    anniversaryDate: Optional[str] = None
+    tips: Optional[List[dict]] = []
 
-stripe.api_key = STRIPE_SECRET_KEY
+class Photo(BaseModel):
+    id: str
+    url: str
+    thumbnail: str
+    coupleId: str
+    uploadedAt: str
+    caption: Optional[str] = None
 
-client = None
-db = None
-couples_collection = None
+# ==========================================
+# PHOTO UPLOAD ROUTES
+# ==========================================
 
-if MONGODB_URI:
-    try:
-        client = MongoClient(MONGODB_URI)
-        db = client.statusapp
-        couples_collection = db.couples
-        print("MongoDB initialized!")
-    except Exception as e:
-        print(f"MongoDB init error: {e}")
-
-def get_collection():
-    global client, db, couples_collection
-    if couples_collection is not None:
-        return couples_collection
-    if MONGODB_URI:
-        try:
-            client = MongoClient(MONGODB_URI)
-            db = client.statusapp
-            couples_collection = db.couples
-            return couples_collection
-        except:
-            pass
-    return None
-
-@app.get("/")
-def root():
-    coll = get_collection()
-    return {"message": "STATUS API", "database": "connected" if coll is not None else "NOT CONNECTED"}
-
-@app.get("/api/health")
-def health():
-    coll = get_collection()
-    return {"status": "healthy", "database": "connected" if coll is not None else "NOT CONNECTED"}
-
-@app.post("/api/verify/email/request")
-def email_request(data: dict):
-    return {"message": "Code sent", "success": True}
-
-@app.post("/api/verify/email/confirm")
-def email_confirm(data: dict):
-    return {"verified": True}
-
-@app.post("/api/payment/create")
-def create_payment(data: dict):
-    if not STRIPE_SECRET_KEY:
-        return {"error": "Payments not configured"}
-    try:
-        session = stripe.checkout.Session.create(
-            payment_method_types=["card"],
-            line_items=[{
-                "price_data": {
-                    "currency": "usd",
-                    "product_data": {"name": "STATUS - Couple Registration"},
-                    "unit_amount": 99,
-                },
-                "quantity": 1,
-            }],
-            mode="payment",
-            success_url=f"{FRONTEND_URL}/?paid=true",
-            cancel_url=f"{FRONTEND_URL}/?paid=false",
-        )
-        return {"url": session.url, "session_id": session.id}
-    except Exception as e:
-        return {"error": str(e)}
-
-# NEW: Verified Badge Payment Endpoint ($4.99)
-@app.post("/api/payment/create-verified")
-def create_verified_payment(data: dict):
-    if not STRIPE_SECRET_KEY:
-        return {"error": "Payments not configured"}
-    try:
-        couple_id = data.get("couple_id", "")
-        session = stripe.checkout.Session.create(
-            payment_method_types=["card"],
-            line_items=[{
-                "price_data": {
-                    "currency": "usd",
-                    "product_data": {"name": "STATUS - Verified Badge"},
-                    "unit_amount": 499,
-                },
-                "quantity": 1,
-            }],
-            mode="payment",
-            success_url=f"{FRONTEND_URL}/?verified=true&couple_id={couple_id}",
-            cancel_url=f"{FRONTEND_URL}/",
-        )
-        return {"url": session.url, "session_id": session.id}
-    except Exception as e:
-        return {"error": str(e)}
-
-@app.post("/api/couples")
-def register_couple(data: dict):
-    coll = get_collection()
-    if coll is None:
-        return {"error": "Database not available", "couple_id": None}
+@app.post("/api/photos/upload")
+async def upload_photos(
+    photos: List[UploadFile] = File(...),
+    coupleId: str = None
+):
+    """
+    Upload multiple photos for a couple
+    Note: This example saves to local storage
+    For production, use AWS S3 or Cloudinary
+    """
+    if not coupleId:
+        raise HTTPException(status_code=400, detail="Couple ID required")
     
-    data["registered_at"] = datetime.utcnow()
-    data["status"] = "active"
+    uploaded_photos = []
     
-    try:
-        result = coll.insert_one(data)
-        couple_id = str(result.inserted_id)
+    for photo in photos:
+        # Generate unique filename
+        file_extension = photo.filename.split(".")[-1]
+        unique_filename = f"{uuid.uuid4()}.{file_extension}"
         
-        email = data.get("person1", {}).get("email", "")
-        p1 = data.get("person1", {}).get("name", "")
-        p2 = data.get("person2", {}).get("name", "")
-        anniversary = data.get("anniversary", "")
+        # Save file locally (for development)
+        # In production, upload to S3/Cloudinary
+        file_path = f"./uploads/{unique_filename}"
+        os.makedirs("./uploads", exist_ok=True)
         
-        if SENDGRID_API_KEY and email:
-            try:
-                ann_text = ""
-                if anniversary:
-                    ann_text = f"<p style='color:#10b981'>Together since {anniversary}</p>"
-                html = f"<div style='font-family:Arial;max-width:600px;margin:0 auto'><div style='background:#10b981;padding:30px;text-align:center'><h1 style='color:white;margin:0'>STATUS</h1></div><div style='padding:30px;background:#f9fafb'><h2>Congratulations!</h2><p>Your relationship is now registered on STATUS!</p><div style='background:white;border:2px solid #10b981;border-radius:10px;padding:20px;margin:20px 0;text-align:center'><strong>{p1}</strong> and <strong>{p2}</strong>{ann_text}</div><p>Anyone can now search for your names and see you are in a registered relationship.</p></div></div>"
-                requests.post(
-                    "https://api.sendgrid.com/v3/mail/send",
-                    headers={"Authorization": f"Bearer {SENDGRID_API_KEY}", "Content-Type": "application/json"},
-                    json={
-                        "personalizations": [{"to": [{"email": email}]}],
-                        "from": {"email": SENDER_EMAIL, "name": "STATUS"},
-                        "subject": "STATUS - Registration Complete!",
-                        "content": [{"type": "text/html", "value": html}]
-                    },
-                    timeout=10
-                )
-            except:
-                pass
+        with open(file_path, "wb") as buffer:
+            content = await photo.read()
+            buffer.write(content)
         
-        return {"couple_id": couple_id, "message": "Registered successfully!"}
-    except Exception as e:
-        return {"error": str(e), "couple_id": None}
-
-@app.get("/api/search")
-def search(name: str = None):
-    if not name:
-        return {"results": [], "total": 0}
-    
-    coll = get_collection()
-    if coll is None:
-        return {"results": [], "total": 0, "error": "Database not available"}
-    
-    search_term = name.strip()
-    
-    try:
-        query = {
-            "$and": [
-                {"status": {"$ne": "deleted"}},
-                {"$or": [
-                    {"person1.name": {"$regex": search_term, "$options": "i"}},
-                    {"person2.name": {"$regex": search_term, "$options": "i"}}
-                ]}
-            ]
+        # Create photo record
+        photo_record = {
+            "id": str(uuid.uuid4()),
+            "url": f"/uploads/{unique_filename}",
+            "thumbnail": f"/uploads/{unique_filename}",  # In production, create thumbnail
+            "coupleId": coupleId,
+            "uploadedAt": datetime.now().isoformat(),
+            "caption": None
         }
         
-        cursor = coll.find(query).limit(50)
-        results = []
+        # Save to database
+        # db.photos.insert_one(photo_record)
         
-        for doc in cursor:
-            results.append({
-                "couple_id": str(doc.get("_id", "")),
-                "person1": doc.get("person1"),
-                "person2": doc.get("person2"),
-                "anniversary": doc.get("anniversary"),
-                "verified": doc.get("verified", False),
-                "registered_at": doc.get("registered_at").isoformat() if doc.get("registered_at") else None
-            })
-        
-        return {"results": results, "total": len(results)}
-    except Exception as e:
-        return {"results": [], "total": 0, "error": str(e)}
+        uploaded_photos.append(photo_record)
+    
+    return {"photos": uploaded_photos, "count": len(uploaded_photos)}
 
-@app.get("/api/couple/{couple_id}")
-def get_couple(couple_id: str):
-    coll = get_collection()
-    if coll is None:
-        return {"error": "Database not available"}
-    
-    try:
-        doc = coll.find_one({"_id": ObjectId(couple_id)})
-        if doc:
-            if doc.get("status") == "deleted":
-                return {"error": "This registration has been deleted"}
-            return {
-                "couple_id": str(doc.get("_id")),
-                "person1": doc.get("person1"),
-                "person2": doc.get("person2"),
-                "anniversary": doc.get("anniversary"),
-                "verified": doc.get("verified", False),
-                "registered_at": doc.get("registered_at").isoformat() if doc.get("registered_at") else None,
-                "status": doc.get("status", "active")
-            }
-    except Exception as e:
-        print(f"Error: {e}")
-    
-    return {"error": "Couple not found"}
 
-@app.post("/api/delete/request")
-def delete_request(data: dict):
-    email = data.get("email", "").strip().lower()
+@app.get("/api/photos/{couple_id}")
+async def get_couple_photos(couple_id: str):
+    """Get all photos for a couple"""
+    # Query from database
+    # photos = list(db.photos.find({"coupleId": couple_id}))
     
-    if not email:
-        return {"success": False, "error": "Email required"}
+    # Example response
+    photos = []
+    return {"photos": photos, "count": len(photos)}
+
+
+@app.delete("/api/photos/{photo_id}")
+async def delete_photo(photo_id: str):
+    """Delete a photo"""
+    # Delete from database and storage
+    # db.photos.delete_one({"id": photo_id})
+    # Also delete file from S3/local storage
     
-    coll = get_collection()
-    if coll is None:
-        return {"success": False, "error": "Database not available"}
+    return {"message": "Photo deleted successfully"}
+
+
+# ==========================================
+# PROFILE CUSTOMIZATION ROUTES
+# ==========================================
+
+@app.put("/api/couples/{couple_id}/customize")
+async def customize_profile(couple_id: str, customization: CoupleCustomization):
+    """Update couple profile customization"""
     
-    try:
-        couple = coll.find_one({
-            "$and": [
-                {"status": {"$ne": "deleted"}},
-                {"$or": [
-                    {"person1.email": {"$regex": f"^{email}$", "$options": "i"}},
-                    {"person2.email": {"$regex": f"^{email}$", "$options": "i"}}
-                ]}
+    # Update in database
+    # db.couples.update_one(
+    #     {"_id": couple_id},
+    #     {"$set": {
+    #         "customColor": customization.customColor,
+    #         "loveStory": customization.loveStory,
+    #         "anniversaryDate": customization.anniversaryDate,
+    #         "tips": customization.tips,
+    #         "updatedAt": datetime.now().isoformat()
+    #     }}
+    # )
+    
+    return {
+        "message": "Profile customized successfully",
+        "customization": customization.dict()
+    }
+
+
+@app.get("/api/couples/{couple_id}/profile")
+async def get_couple_profile(couple_id: str):
+    """Get full couple profile with customization and photos"""
+    
+    # Query from database
+    # couple = db.couples.find_one({"_id": couple_id})
+    # photos = list(db.photos.find({"coupleId": couple_id}))
+    
+    # Example response
+    return {
+        "couple": {
+            "id": couple_id,
+            "person1Name": "John",
+            "person2Name": "Jane",
+            "verified": True,
+            "customColor": "#667eea",
+            "loveStory": "We met at a coffee shop...",
+            "anniversaryDate": "2023-01-15",
+            "tips": [],
+            "registeredAt": "2024-01-20T10:00:00"
+        },
+        "photos": [],
+        "stats": {
+            "daysTogether": 380,
+            "photosCount": 0
+        }
+    }
+
+
+# ==========================================
+# ALTERNATIVE: Using Cloudinary for Images
+# ==========================================
+"""
+Install: pip install cloudinary
+
+import cloudinary
+import cloudinary.uploader
+
+# Configure Cloudinary
+cloudinary.config(
+    cloud_name = "your_cloud_name",
+    api_key = "your_api_key",
+    api_secret = "your_api_secret"
+)
+
+@app.post("/api/photos/upload-cloudinary")
+async def upload_to_cloudinary(
+    photos: List[UploadFile] = File(...),
+    coupleId: str = None
+):
+    uploaded_photos = []
+    
+    for photo in photos:
+        # Upload to Cloudinary
+        result = cloudinary.uploader.upload(
+            photo.file,
+            folder=f"couples/{coupleId}",
+            transformation=[
+                {"width": 800, "height": 800, "crop": "limit"},
+                {"quality": "auto"},
+                {"fetch_format": "auto"}
             ]
-        })
-        
-        if couple:
-            return {"success": True, "message": "Registration found"}
-        return {"success": False, "error": "No registration found with this email"}
-    except Exception as e:
-        return {"success": False, "error": str(e)}
-
-@app.post("/api/delete/confirm")
-def delete_confirm(data: dict):
-    email = data.get("email", "").strip().lower()
-    
-    if not email:
-        return {"success": False, "error": "Email required"}
-    
-    coll = get_collection()
-    if coll is None:
-        return {"success": False, "error": "Database not available"}
-    
-    try:
-        result = coll.update_one(
-            {"$or": [
-                {"person1.email": {"$regex": f"^{email}$", "$options": "i"}},
-                {"person2.email": {"$regex": f"^{email}$", "$options": "i"}}
-            ]},
-            {"$set": {"status": "deleted", "deleted_at": datetime.utcnow()}}
         )
         
-        if result.modified_count > 0:
-            return {"success": True, "message": "Registration deleted successfully"}
-        return {"success": False, "error": "Could not delete registration"}
-    except Exception as e:
-        return {"success": False, "error": str(e)}
-
-@app.get("/api/stats")
-def stats():
-    coll = get_collection()
-    if coll is None:
-        return {"total": 0, "database": "NOT CONNECTED"}
-    
-    try:
-        total = coll.count_documents({"status": {"$ne": "deleted"}})
-        return {"total": total, "database": "connected"}
-    except:
-        return {"total": 0, "database": "error"}
-
-@app.get("/api/admin/all")
-def admin_all(limit: int = 100):
-    coll = get_collection()
-    if coll is None:
-        return {"registrations": [], "count": 0, "error": "Database not available"}
-    
-    try:
-        cursor = coll.find().sort("registered_at", -1).limit(limit)
-        results = []
+        photo_record = {
+            "id": str(uuid.uuid4()),
+            "url": result["secure_url"],
+            "thumbnail": result["secure_url"].replace("/upload/", "/upload/c_thumb,w_200,h_200/"),
+            "coupleId": coupleId,
+            "uploadedAt": datetime.now().isoformat()
+        }
         
-        for doc in cursor:
-            results.append({
-                "couple_id": str(doc.get("_id", "")),
-                "person1": doc.get("person1", {}).get("name", ""),
-                "person2": doc.get("person2", {}).get("name", ""),
-                "person1_email": doc.get("person1", {}).get("email", ""),
-                "person1_city": doc.get("person1", {}).get("city", ""),
-                "anniversary": doc.get("anniversary"),
-                "status": doc.get("status", "active"),
-                "verified": doc.get("verified", False),
-                "registered_at": doc.get("registered_at").isoformat() if doc.get("registered_at") else None
-            })
-        
-        return {"registrations": results, "count": len(results)}
-    except Exception as e:
-        return {"registrations": [], "count": 0, "error": str(e)}
+        uploaded_photos.append(photo_record)
+    
+    return {"photos": uploaded_photos, "count": len(uploaded_photos)}
+"""
