@@ -1,199 +1,190 @@
-// STATUS BACKEND - FIXED VERSION
-// Missing /api/payment/create route added
-const express = require('express');
-const mongoose = require('mongoose');
-const cors = require('cors');
-const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
-require('dotenv').config();
+# STATUS BACKEND - PYTHON/FASTAPI - FIXED VERSION
+# Missing /api/payment/create route added
 
-const app = express();
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from motor.motor_asyncio import AsyncIOMotorClient
+from bson import ObjectId
+from datetime import datetime
+import stripe
+import os
+from typing import Optional
 
-app.use(cors());
-app.use(express.json());
+app = FastAPI()
 
-// MongoDB Connection
-mongoose.connect(process.env.MONGODB_URI)
-  .then(() => console.log('✅ MongoDB Connected'))
-  .catch(err => console.error('❌ MongoDB Error:', err));
+# CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-// Couple Schema
-const coupleSchema = new mongoose.Schema({
-  person1Name: String,
-  person2Name: String,
-  relationshipDate: Date,
-  verified: { type: Boolean, default: false },
-  email: String,
-  phone: String,
-  stripePaymentId: String,
-  createdAt: { type: Date, default: Date.now }
-});
+# MongoDB
+MONGODB_URL = os.getenv("MONGODB_URL")
+client = AsyncIOMotorClient(MONGODB_URL)
+db = client.status_db
+couples_collection = db.couples
 
-const Couple = mongoose.model('Couple', coupleSchema);
+# Stripe
+stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
 
-// ===================================
-// ROUTES
-// ===================================
+# ===================================
+# MODELS
+# ===================================
 
-// Health Check
-app.get('/api/health', (req, res) => {
-  res.json({ 
-    status: 'healthy', 
-    database: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected' 
-  });
-});
+class PaymentRequest(BaseModel):
+    person1Name: str
+    person2Name: str
+    relationshipDate: str
+    email: str
+    phone: str
+    amount: float
 
-// Search Route
-app.get('/api/search', async (req, res) => {
-  try {
-    const { name } = req.query;
+class PaymentConfirm(BaseModel):
+    paymentIntentId: str
+
+# ===================================
+# ROUTES
+# ===================================
+
+@app.get("/")
+async def root():
+    return {
+        "message": "STATUS API v1.0",
+        "status": "running",
+        "endpoints": [
+            "GET /api/health",
+            "GET /api/search",
+            "POST /api/payment/create",
+            "GET /api/couples/{id}"
+        ]
+    }
+
+@app.get("/api/health")
+async def health_check():
+    try:
+        await client.admin.command('ping')
+        return {"status": "healthy", "database": "connected"}
+    except:
+        return {"status": "healthy", "database": "disconnected"}
+
+@app.get("/api/search")
+async def search_couples(name: str):
+    if not name:
+        raise HTTPException(status_code=400, detail="Name is required")
     
-    if (!name) {
-      return res.status(400).json({ error: 'Name is required' });
-    }
-
-    const couples = await Couple.find({
-      $or: [
-        { person1Name: new RegExp(name, 'i') },
-        { person2Name: new RegExp(name, 'i') }
-      ]
-    }).limit(10);
-
-    res.json({ couples });
-  } catch (error) {
-    console.error('Search error:', error);
-    res.status(500).json({ error: 'Search failed' });
-  }
-});
-
-// ===================================
-// PAYMENT ROUTE - THIS WAS MISSING!
-// ===================================
-app.post('/api/payment/create', async (req, res) => {
-  try {
-    const { person1Name, person2Name, relationshipDate, email, phone, amount } = req.body;
-
-    console.log('Payment request received:', { person1Name, person2Name, amount });
-
-    // Create Stripe payment intent
-    const paymentIntent = await stripe.paymentIntents.create({
-      amount: Math.round(amount * 100), // Convert to cents
-      currency: 'usd',
-      metadata: {
-        person1Name,
-        person2Name,
-        relationshipDate,
-        email
-      }
-    });
-
-    console.log('Payment intent created:', paymentIntent.id);
-
-    // Save couple to database
-    const couple = new Couple({
-      person1Name,
-      person2Name,
-      relationshipDate: new Date(relationshipDate),
-      email,
-      phone,
-      stripePaymentId: paymentIntent.id,
-      verified: amount >= 4.99 // Auto-verify if they paid for verified badge
-    });
-
-    await couple.save();
-
-    res.json({
-      success: true,
-      clientSecret: paymentIntent.client_secret,
-      coupleId: couple._id
-    });
-
-  } catch (error) {
-    console.error('Payment creation error:', error);
-    res.status(500).json({ 
-      error: 'Payment creation failed', 
-      message: error.message 
-    });
-  }
-});
-
-// Verify payment (webhook or confirmation)
-app.post('/api/payment/confirm', async (req, res) => {
-  try {
-    const { paymentIntentId } = req.body;
-
-    const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
-
-    if (paymentIntent.status === 'succeeded') {
-      await Couple.findOneAndUpdate(
-        { stripePaymentId: paymentIntentId },
-        { verified: true }
-      );
-
-      res.json({ success: true, message: 'Payment confirmed!' });
-    } else {
-      res.status(400).json({ error: 'Payment not successful' });
-    }
-  } catch (error) {
-    console.error('Payment confirmation error:', error);
-    res.status(500).json({ error: 'Confirmation failed' });
-  }
-});
-
-// Get couple by ID
-app.get('/api/couples/:id', async (req, res) => {
-  try {
-    const couple = await Couple.findById(req.params.id);
+    couples = await couples_collection.find({
+        "$or": [
+            {"person1Name": {"$regex": name, "$options": "i"}},
+            {"person2Name": {"$regex": name, "$options": "i"}}
+        ]
+    }).limit(10).to_list(10)
     
-    if (!couple) {
-      return res.status(404).json({ error: 'Couple not found' });
-    }
-
-    res.json({ couple });
-  } catch (error) {
-    console.error('Get couple error:', error);
-    res.status(500).json({ error: 'Failed to get couple' });
-  }
-});
-
-// Get couple profile (public view)
-app.get('/api/couples/:couple_id/profile', async (req, res) => {
-  try {
-    const couple = await Couple.findById(req.params.couple_id);
+    # Convert ObjectId to string
+    for couple in couples:
+        couple["_id"] = str(couple["_id"])
     
-    if (!couple) {
-      return res.status(404).json({ error: 'Couple not found' });
-    }
+    return {"couples": couples}
 
-    res.json({
-      person1Name: couple.person1Name,
-      person2Name: couple.person2Name,
-      relationshipDate: couple.relationshipDate,
-      verified: couple.verified,
-      createdAt: couple.createdAt
-    });
-  } catch (error) {
-    res.status(500).json({ error: 'Profile not found' });
-  }
-});
+# ===================================
+# PAYMENT ROUTE - THIS WAS MISSING!
+# ===================================
 
-// Root route
-app.get('/', (req, res) => {
-  res.json({ 
-    message: 'STATUS API v1.0',
-    status: 'running',
-    endpoints: [
-      'GET /api/health',
-      'GET /api/search?name=...',
-      'POST /api/payment/create',
-      'GET /api/couples/:id'
-    ]
-  });
-});
+@app.post("/api/payment/create")
+async def create_payment(payment: PaymentRequest):
+    try:
+        print(f"Payment request: {payment.person1Name} & {payment.person2Name}, ${payment.amount}")
+        
+        # Create Stripe payment intent
+        payment_intent = stripe.PaymentIntent.create(
+            amount=int(payment.amount * 100),  # Convert to cents
+            currency="usd",
+            metadata={
+                "person1Name": payment.person1Name,
+                "person2Name": payment.person2Name,
+                "relationshipDate": payment.relationshipDate,
+                "email": payment.email
+            }
+        )
+        
+        print(f"Payment intent created: {payment_intent.id}")
+        
+        # Save couple to database
+        couple_data = {
+            "person1Name": payment.person1Name,
+            "person2Name": payment.person2Name,
+            "relationshipDate": datetime.fromisoformat(payment.relationshipDate.replace('Z', '+00:00')),
+            "email": payment.email,
+            "phone": payment.phone,
+            "stripePaymentId": payment_intent.id,
+            "verified": payment.amount >= 4.99,
+            "createdAt": datetime.utcnow()
+        }
+        
+        result = await couples_collection.insert_one(couple_data)
+        
+        return {
+            "success": True,
+            "clientSecret": payment_intent.client_secret,
+            "coupleId": str(result.inserted_id)
+        }
+        
+    except Exception as e:
+        print(f"Payment creation error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Payment creation failed: {str(e)}")
 
-// Start Server
-const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
-  console.log(`✅ STATUS API running on port ${PORT}`);
-});
+@app.post("/api/payment/confirm")
+async def confirm_payment(confirm: PaymentConfirm):
+    try:
+        payment_intent = stripe.PaymentIntent.retrieve(confirm.paymentIntentId)
+        
+        if payment_intent.status == "succeeded":
+            await couples_collection.update_one(
+                {"stripePaymentId": confirm.paymentIntentId},
+                {"$set": {"verified": True}}
+            )
+            return {"success": True, "message": "Payment confirmed!"}
+        else:
+            raise HTTPException(status_code=400, detail="Payment not successful")
+            
+    except Exception as e:
+        print(f"Payment confirmation error: {str(e)}")
+        raise HTTPException(status_code=500, detail="Confirmation failed")
 
-module.exports = app;
+@app.get("/api/couples/{couple_id}")
+async def get_couple(couple_id: str):
+    try:
+        couple = await couples_collection.find_one({"_id": ObjectId(couple_id)})
+        
+        if not couple:
+            raise HTTPException(status_code=404, detail="Couple not found")
+        
+        couple["_id"] = str(couple["_id"])
+        return {"couple": couple}
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail="Failed to get couple")
+
+@app.get("/api/couples/{couple_id}/profile")
+async def get_couple_profile(couple_id: str):
+    try:
+        couple = await couples_collection.find_one({"_id": ObjectId(couple_id)})
+        
+        if not couple:
+            raise HTTPException(status_code=404, detail="Couple not found")
+        
+        return {
+            "person1Name": couple.get("person1Name"),
+            "person2Name": couple.get("person2Name"),
+            "relationshipDate": couple.get("relationshipDate"),
+            "verified": couple.get("verified", False),
+            "createdAt": couple.get("createdAt")
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail="Profile not found")
+
+# Run with: uvicorn main:app --host 0.0.0.0 --port $PORT
