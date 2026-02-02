@@ -1,7 +1,7 @@
-fastapi==0.100.0
-uvicorn==0.23.0
-motor==3.2.0
-pymongo==4.5.0
-stripe==5.5.0
-pydantic==1.10.12
-python-multipart==0.0.5
+fastapi
+uvicorn[standard]
+motor
+pymongo
+stripe
+pydantic
+python-multipart
