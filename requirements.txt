@@ -1,7 +1,6 @@
 fastapi
-uvicorn[standard]
-motor
-pymongo
+uvicorn
+requests
 stripe
-pydantic
-python-multipart
+pymongo
+dnspython
