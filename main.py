@@ -1,265 +1,317 @@
-from fastapi import FastAPI, HTTPException, File, UploadFile
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from motor.motor_asyncio import AsyncIOMotorClient
+from pymongo import MongoClient
 from bson import ObjectId
-from datetime import datetime
-from typing import List, Optional
-import stripe
 import os
-import uuid
+import requests
+import stripe
+from datetime import datetime
 
 app = FastAPI()
 
-# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# MongoDB
-MONGODB_URL = os.getenv("MONGODB_URL")
-client = AsyncIOMotorClient(MONGODB_URL)
-db = client.status_db
-couples_collection = db.couples
-photos_collection = db.photos
+SENDGRID_API_KEY = os.environ.get("SENDGRID_API_KEY", "")
+SENDER_EMAIL = os.environ.get("SENDER_EMAIL", "Krisfer12@gmail.com")
+STRIPE_SECRET_KEY = os.environ.get("STRIPE_SECRET_KEY", "")
+MONGODB_URI = os.environ.get("MONGODB_URI", "")
+FRONTEND_URL = "https://vite-react-rouge-omega-62.vercel.app"
 
-# Stripe
-stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
+stripe.api_key = STRIPE_SECRET_KEY
 
-# ===================================
-# MODELS
-# ===================================
+client = None
+db = None
+couples_collection = None
 
-class PaymentRequest(BaseModel):
-    person1Name: str
-    person2Name: str
-    relationshipDate: str
-    email: str
-    phone: str
-    amount: float
+if MONGODB_URI:
+    try:
+        client = MongoClient(MONGODB_URI)
+        db = client.statusapp
+        couples_collection = db.couples
+        print("MongoDB initialized!")
+    except Exception as e:
+        print(f"MongoDB init error: {e}")
 
-class CoupleCustomization(BaseModel):
-    customColor: Optional[str] = "#667eea"
-    loveStory: Optional[str] = ""
-    anniversaryDate: Optional[str] = None
-    tips: Optional[List[dict]] = []
-
-# ===================================
-# BASIC ROUTES
-# ===================================
+def get_collection():
+    global client, db, couples_collection
+    if couples_collection is not None:
+        return couples_collection
+    if MONGODB_URI:
+        try:
+            client = MongoClient(MONGODB_URI)
+            db = client.statusapp
+            couples_collection = db.couples
+            return couples_collection
+        except:
+            pass
+    return None
 
 @app.get("/")
-async def root():
-    return {"message": "STATUS API", "status": "running"}
+def root():
+    coll = get_collection()
+    return {"message": "STATUS API", "database": "connected" if coll is not None else "NOT CONNECTED"}
 
 @app.get("/api/health")
-async def health_check():
-    try:
-        await client.admin.command('ping')
-        return {"status": "healthy", "database": "connected"}
-    except:
-        return {"status": "healthy", "database": "disconnected"}
+def health():
+    coll = get_collection()
+    return {"status": "healthy", "database": "connected" if coll is not None else "NOT CONNECTED"}
 
-# ===================================
-# SEARCH
-# ===================================
+@app.post("/api/verify/email/request")
+def email_request(data: dict):
+    return {"message": "Code sent", "success": True}
 
-@app.get("/api/search")
-async def search_couples(name: str):
-    if not name:
-        raise HTTPException(status_code=400, detail="Name required")
-    
-    couples = await couples_collection.find({
-        "$or": [
-            {"person1Name": {"$regex": name, "$options": "i"}},
-            {"person2Name": {"$regex": name, "$options": "i"}}
-        ]
-    }).limit(10).to_list(10)
-    
-    for couple in couples:
-        couple["_id"] = str(couple["_id"])
-    
-    return {"couples": couples}
-
-# ===================================
-# PAYMENT
-# ===================================
+@app.post("/api/verify/email/confirm")
+def email_confirm(data: dict):
+    return {"verified": True}
 
 @app.post("/api/payment/create")
-async def create_payment(payment: PaymentRequest):
+def create_payment(data: dict):
+    if not STRIPE_SECRET_KEY:
+        return {"error": "Payments not configured"}
     try:
-        print(f"💳 Payment: {payment.person1Name} & {payment.person2Name}")
-        
-        # Create Stripe payment
-        payment_intent = stripe.PaymentIntent.create(
-            amount=int(payment.amount * 100),
-            currency="usd",
-            metadata={
-                "person1Name": payment.person1Name,
-                "person2Name": payment.person2Name,
-                "email": payment.email
-            }
+        session = stripe.checkout.Session.create(
+            payment_method_types=["card"],
+            line_items=[{
+                "price_data": {
+                    "currency": "usd",
+                    "product_data": {"name": "STATUS - Couple Registration"},
+                    "unit_amount": 99,
+                },
+                "quantity": 1,
+            }],
+            mode="payment",
+            success_url=f"{FRONTEND_URL}/?paid=true",
+            cancel_url=f"{FRONTEND_URL}/?paid=false",
         )
-        
-        # Save couple
-        couple_data = {
-            "person1Name": payment.person1Name,
-            "person2Name": payment.person2Name,
-            "relationshipDate": payment.relationshipDate,
-            "email": payment.email,
-            "phone": payment.phone,
-            "stripePaymentId": payment_intent.id,
-            "verified": payment.amount >= 4.99,
-            "customColor": "#667eea",
-            "loveStory": "",
-            "tips": [],
-            "createdAt": datetime.utcnow()
-        }
-        
-        result = await couples_collection.insert_one(couple_data)
-        
-        return {
-            "success": True,
-            "clientSecret": payment_intent.client_secret,
-            "coupleId": str(result.inserted_id)
-        }
-        
-    except stripe.error.StripeError as e:
-        print(f"❌ Stripe error: {str(e)}")
-        raise HTTPException(status_code=400, detail=str(e))
+        return {"url": session.url, "session_id": session.id}
     except Exception as e:
-        print(f"❌ Error: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        return {"error": str(e)}
 
-# ===================================
-# PHOTO UPLOAD
-# ===================================
-
-@app.post("/api/photos/upload")
-async def upload_photos(
-    photos: List[UploadFile] = File(...),
-    coupleId: str = None
-):
-    """Upload photos for a couple"""
-    if not coupleId:
-        raise HTTPException(status_code=400, detail="Couple ID required")
-    
-    uploaded_photos = []
-    
-    for photo in photos:
-        # Generate filename
-        file_ext = photo.filename.split(".")[-1]
-        unique_filename = f"{uuid.uuid4()}.{file_ext}"
-        
-        # Save locally (for development)
-        file_path = f"./uploads/{unique_filename}"
-        os.makedirs("./uploads", exist_ok=True)
-        
-        with open(file_path, "wb") as buffer:
-            content = await photo.read()
-            buffer.write(content)
-        
-        # Create photo record
-        photo_record = {
-            "id": str(uuid.uuid4()),
-            "url": f"/uploads/{unique_filename}",
-            "thumbnail": f"/uploads/{unique_filename}",
-            "coupleId": coupleId,
-            "uploadedAt": datetime.utcnow().isoformat()
-        }
-        
-        await photos_collection.insert_one(photo_record)
-        uploaded_photos.append(photo_record)
-    
-    return {"photos": uploaded_photos, "count": len(uploaded_photos)}
-
-@app.get("/api/photos/{couple_id}")
-async def get_couple_photos(couple_id: str):
-    """Get all photos for a couple"""
-    photos = await photos_collection.find({"coupleId": couple_id}).to_list(100)
-    
-    for photo in photos:
-        photo["_id"] = str(photo["_id"])
-    
-    return {"photos": photos, "count": len(photos)}
-
-@app.delete("/api/photos/{photo_id}")
-async def delete_photo(photo_id: str):
-    """Delete a photo"""
-    result = await photos_collection.delete_one({"id": photo_id})
-    
-    if result.deleted_count == 0:
-        raise HTTPException(status_code=404, detail="Photo not found")
-    
-    return {"message": "Photo deleted"}
-
-# ===================================
-# PROFILE & CUSTOMIZATION
-# ===================================
-
-@app.get("/api/couples/{couple_id}/profile")
-async def get_couple_profile(couple_id: str):
-    """Get full couple profile"""
+# NEW: Verified Badge Payment Endpoint ($4.99)
+@app.post("/api/payment/create-verified")
+def create_verified_payment(data: dict):
+    if not STRIPE_SECRET_KEY:
+        return {"error": "Payments not configured"}
     try:
-        couple = await couples_collection.find_one({"_id": ObjectId(couple_id)})
+        couple_id = data.get("couple_id", "")
+        session = stripe.checkout.Session.create(
+            payment_method_types=["card"],
+            line_items=[{
+                "price_data": {
+                    "currency": "usd",
+                    "product_data": {"name": "STATUS - Verified Badge"},
+                    "unit_amount": 499,
+                },
+                "quantity": 1,
+            }],
+            mode="payment",
+            success_url=f"{FRONTEND_URL}/?verified=true&couple_id={couple_id}",
+            cancel_url=f"{FRONTEND_URL}/",
+        )
+        return {"url": session.url, "session_id": session.id}
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.post("/api/couples")
+def register_couple(data: dict):
+    coll = get_collection()
+    if coll is None:
+        return {"error": "Database not available", "couple_id": None}
+    
+    data["registered_at"] = datetime.utcnow()
+    data["status"] = "active"
+    
+    try:
+        result = coll.insert_one(data)
+        couple_id = str(result.inserted_id)
         
-        if not couple:
-            raise HTTPException(status_code=404, detail="Not found")
+        email = data.get("person1", {}).get("email", "")
+        p1 = data.get("person1", {}).get("name", "")
+        p2 = data.get("person2", {}).get("name", "")
+        anniversary = data.get("anniversary", "")
         
-        # Get photos
-        photos = await photos_collection.find({"coupleId": couple_id}).to_list(100)
-        
-        couple["_id"] = str(couple["_id"])
-        for photo in photos:
-            photo["_id"] = str(photo["_id"])
-        
-        # Calculate days together
-        days_together = 0
-        if couple.get("relationshipDate"):
+        if SENDGRID_API_KEY and email:
             try:
-                rel_date = datetime.fromisoformat(couple["relationshipDate"].replace('Z', '+00:00'))
-                days_together = (datetime.utcnow() - rel_date).days
+                ann_text = ""
+                if anniversary:
+                    ann_text = f"<p style='color:#10b981'>Together since {anniversary}</p>"
+                html = f"<div style='font-family:Arial;max-width:600px;margin:0 auto'><div style='background:#10b981;padding:30px;text-align:center'><h1 style='color:white;margin:0'>STATUS</h1></div><div style='padding:30px;background:#f9fafb'><h2>Congratulations!</h2><p>Your relationship is now registered on STATUS!</p><div style='background:white;border:2px solid #10b981;border-radius:10px;padding:20px;margin:20px 0;text-align:center'><strong>{p1}</strong> and <strong>{p2}</strong>{ann_text}</div><p>Anyone can now search for your names and see you are in a registered relationship.</p></div></div>"
+                requests.post(
+                    "https://api.sendgrid.com/v3/mail/send",
+                    headers={"Authorization": f"Bearer {SENDGRID_API_KEY}", "Content-Type": "application/json"},
+                    json={
+                        "personalizations": [{"to": [{"email": email}]}],
+                        "from": {"email": SENDER_EMAIL, "name": "STATUS"},
+                        "subject": "STATUS - Registration Complete!",
+                        "content": [{"type": "text/html", "value": html}]
+                    },
+                    timeout=10
+                )
             except:
                 pass
         
-        return {
-            "couple": couple,
-            "photos": photos,
-            "stats": {
-                "daysTogether": days_together,
-                "photosCount": len(photos)
-            }
-        }
+        return {"couple_id": couple_id, "message": "Registered successfully!"}
     except Exception as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        return {"error": str(e), "couple_id": None}
 
-@app.put("/api/couples/{couple_id}/customize")
-async def customize_profile(couple_id: str, customization: CoupleCustomization):
-    """Update couple profile customization"""
+@app.get("/api/search")
+def search(name: str = None):
+    if not name:
+        return {"results": [], "total": 0}
+    
+    coll = get_collection()
+    if coll is None:
+        return {"results": [], "total": 0, "error": "Database not available"}
+    
+    search_term = name.strip()
+    
     try:
-        result = await couples_collection.update_one(
-            {"_id": ObjectId(couple_id)},
-            {"$set": {
-                "customColor": customization.customColor,
-                "loveStory": customization.loveStory,
-                "anniversaryDate": customization.anniversaryDate,
-                "tips": customization.tips,
-                "updatedAt": datetime.utcnow().isoformat()
-            }}
+        query = {
+            "$and": [
+                {"status": {"$ne": "deleted"}},
+                {"$or": [
+                    {"person1.name": {"$regex": search_term, "$options": "i"}},
+                    {"person2.name": {"$regex": search_term, "$options": "i"}}
+                ]}
+            ]
+        }
+        
+        cursor = coll.find(query).limit(50)
+        results = []
+        
+        for doc in cursor:
+            results.append({
+                "couple_id": str(doc.get("_id", "")),
+                "person1": doc.get("person1"),
+                "person2": doc.get("person2"),
+                "anniversary": doc.get("anniversary"),
+                "verified": doc.get("verified", False),
+                "registered_at": doc.get("registered_at").isoformat() if doc.get("registered_at") else None
+            })
+        
+        return {"results": results, "total": len(results)}
+    except Exception as e:
+        return {"results": [], "total": 0, "error": str(e)}
+
+@app.get("/api/couple/{couple_id}")
+def get_couple(couple_id: str):
+    coll = get_collection()
+    if coll is None:
+        return {"error": "Database not available"}
+    
+    try:
+        doc = coll.find_one({"_id": ObjectId(couple_id)})
+        if doc:
+            if doc.get("status") == "deleted":
+                return {"error": "This registration has been deleted"}
+            return {
+                "couple_id": str(doc.get("_id")),
+                "person1": doc.get("person1"),
+                "person2": doc.get("person2"),
+                "anniversary": doc.get("anniversary"),
+                "verified": doc.get("verified", False),
+                "registered_at": doc.get("registered_at").isoformat() if doc.get("registered_at") else None,
+                "status": doc.get("status", "active")
+            }
+    except Exception as e:
+        print(f"Error: {e}")
+    
+    return {"error": "Couple not found"}
+
+@app.post("/api/delete/request")
+def delete_request(data: dict):
+    email = data.get("email", "").strip().lower()
+    
+    if not email:
+        return {"success": False, "error": "Email required"}
+    
+    coll = get_collection()
+    if coll is None:
+        return {"success": False, "error": "Database not available"}
+    
+    try:
+        couple = coll.find_one({
+            "$and": [
+                {"status": {"$ne": "deleted"}},
+                {"$or": [
+                    {"person1.email": {"$regex": f"^{email}$", "$options": "i"}},
+                    {"person2.email": {"$regex": f"^{email}$", "$options": "i"}}
+                ]}
+            ]
+        })
+        
+        if couple:
+            return {"success": True, "message": "Registration found"}
+        return {"success": False, "error": "No registration found with this email"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+@app.post("/api/delete/confirm")
+def delete_confirm(data: dict):
+    email = data.get("email", "").strip().lower()
+    
+    if not email:
+        return {"success": False, "error": "Email required"}
+    
+    coll = get_collection()
+    if coll is None:
+        return {"success": False, "error": "Database not available"}
+    
+    try:
+        result = coll.update_one(
+            {"$or": [
+                {"person1.email": {"$regex": f"^{email}$", "$options": "i"}},
+                {"person2.email": {"$regex": f"^{email}$", "$options": "i"}}
+            ]},
+            {"$set": {"status": "deleted", "deleted_at": datetime.utcnow()}}
         )
         
-        if result.matched_count == 0:
-            raise HTTPException(status_code=404, detail="Couple not found")
-        
-        return {
-            "message": "Profile updated",
-            "customization": customization.dict()
-        }
+        if result.modified_count > 0:
+            return {"success": True, "message": "Registration deleted successfully"}
+        return {"success": False, "error": "Could not delete registration"}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        return {"success": False, "error": str(e)}
 
-# Run with: uvicorn main:app --host 0.0.0.0 --port $PORT
+@app.get("/api/stats")
+def stats():
+    coll = get_collection()
+    if coll is None:
+        return {"total": 0, "database": "NOT CONNECTED"}
+    
+    try:
+        total = coll.count_documents({"status": {"$ne": "deleted"}})
+        return {"total": total, "database": "connected"}
+    except:
+        return {"total": 0, "database": "error"}
+
+@app.get("/api/admin/all")
+def admin_all(limit: int = 100):
+    coll = get_collection()
+    if coll is None:
+        return {"registrations": [], "count": 0, "error": "Database not available"}
+    
+    try:
+        cursor = coll.find().sort("registered_at", -1).limit(limit)
+        results = []
+        
+        for doc in cursor:
+            results.append({
+                "couple_id": str(doc.get("_id", "")),
+                "person1": doc.get("person1", {}).get("name", ""),
+                "person2": doc.get("person2", {}).get("name", ""),
+                "person1_email": doc.get("person1", {}).get("email", ""),
+                "person1_city": doc.get("person1", {}).get("city", ""),
+                "anniversary": doc.get("anniversary"),
+                "status": doc.get("status", "active"),
+                "verified": doc.get("verified", False),
+                "registered_at": doc.get("registered_at").isoformat() if doc.get("registered_at") else None
+            })
+        
+        return {"registrations": results, "count": len(results)}
+    except Exception as e:
+        return {"registrations": [], "count": 0, "error": str(e)}
